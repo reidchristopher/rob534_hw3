@@ -1,6 +1,7 @@
 from maze import Maze
 import numpy as np
 import time
+import matplotlib.pyplot as plt
 
 
 class POMDPMazeSolver:
@@ -11,7 +12,7 @@ class POMDPMazeSolver:
         self.discount = 0.9
         self.maze = Maze(noise=noise, discount=self.discount)
         self.maze.load_maze("mazes/maze1.txt")
-        self.values = np.zeros((6,  4, 6, 4))
+        self.values = np.zeros((6, 4, 6, 4, 4))
         
         self.target_belief = np.ones((6, 4))
         self.target_belief[1, 1] = 0.0
@@ -31,13 +32,13 @@ class POMDPMazeSolver:
         for target_x in range(6):
             for target_y in range(4):
                 
-                _, next_states, _ = self.get_action_most_likely((target_x, target_y), (0, 0))
-                
-                scale = 1 / len(next_states)
-                
-                for state in next_states:
+                for a in range(4):
+                    next_state = self.maze.is_move_valid(a, position=(target_x, target_y))
+                                    
+                    if next_state is None:
+                        next_state = (target_x, target_y)
                     
-                    new_belief[state[0], state[1]] += self.target_belief[target_x, target_y] * scale
+                    new_belief[next_state[0], next_state[1]] += self.target_belief[target_x, target_y] / 4
                     
         new_belief /= np.sum(new_belief)
         
@@ -49,45 +50,45 @@ class POMDPMazeSolver:
         done = False
         i = 1
         while not done:
-            converged = True
+            new_values = np.zeros(self.values.shape)
             for target_x in range(6):
                 for target_y in range(4):
                     for robot_x in range(6):
                         for robot_y in range(4):
+                            for a in range(4):
                     
-                            original_value = self.values[target_x, target_y, robot_x, robot_y]
-                            
-                            if (robot_x, robot_y) == (target_x, target_y):
-                                self.values[target_x, target_y, robot_x, robot_y] = 1.0
-                                continue
-                            
-                            max_state, next_states, max_action = self.get_action_most_likely((robot_x, robot_y), (target_x, target_y))
-                            
-                            s = 0
-                            for action, state in enumerate(next_states):
-                                if action == max_action:
-                                    p = 1 - self.maze.noise
-                                else:
-                                    p = self.maze.noise / (len(next_states) - 1)
+                                for noisy_a in range(4):
+                                # determine odds of taking the action
+                                    if noisy_a == a:
+                                        p = 1 - self.maze.noise
+                                    else:
+                                        p = self.maze.noise / 3
+                                        
+                                    # get the state transitioned to if taking that action
+                                    next_state = self.maze.is_move_valid(noisy_a, position=(robot_x, robot_y))
                                     
-                                next_value = self.values[target_x, target_y, state[0], state[1]]
-                                s += p * next_value
-                            
-                            self.values[target_x, target_y, robot_x, robot_y] =  s * self.discount
-                            
-                            if abs(original_value - self.values[target_x, target_y, robot_x, robot_y]) / (original_value + 1e-6) > 0.001:
-                                converged = False
+                                    if next_state is None:
+                                        next_state = (robot_x, robot_y)
+                                        
+                                    # find the value of that state
+                                    next_value = np.max(self.values[target_x, target_y, next_state[0], next_state[1]])
+                                    
+                                    r_next = int((target_x, target_y) == (next_state[0], next_state[1]))
+                                    new_values[target_x, target_y, robot_x, robot_y, a] += p * (r_next + self.discount * next_value)
+                
+            converged = np.all(np.abs(self.values - new_values) / (self.values + 1e-10) < 1e-6)
+            self.values = new_values
                 
             i += 1
             if num_iterations is not None:
                 if i > num_iterations:
                     done = True
             elif converged:
+                print("Values converged after %d iterations" % i)
                 done = True
                 
     def get_action(self, robot_state):
         
-
         if self.method == "most_likely":
             return self.get_action_most_likely(robot_state)
         elif self.method == "QMDP":
@@ -99,66 +100,37 @@ class POMDPMazeSolver:
         if target_state is None:
             target_state = np.unravel_index(np.argmax(self.target_belief), self.target_belief.shape)
         
-        max_value = None
-        max_state = None
-        max_action = None
-        next_states = []
-        for action in self.maze.actions:
-            
-            next_state = self.maze.is_move_valid(action, position=robot_state)
-            
-            if next_state is None:
-                next_state = robot_state
-            
-            next_states.append(next_state)
-            
-            next_value = self.values[target_state[0], target_state[1], next_state[0], next_state[1]]
-                
-            if max_value is None:
-                max_value = next_value
-                max_state = next_state
-                max_action = action
-            elif next_value > max_value:
-                max_value = next_value
-                max_state = next_state
-                max_action = action
-            
-        return max_state, next_states, max_action
+        return np.argmax(self.values[target_state[0], target_state[1], robot_state[0], robot_state[1]])
     
     def get_action_QMDP(self, robot_state):
         
-        max_value = None
-        max_state = None
-        max_action = None
-        next_states = []
+        values = np.zeros(4)
         for action in self.maze.actions:
-            value = 0
             for target_x in range(6):
                 for target_y in range(4):
                     belief = self.target_belief[target_x, target_y]
-                
-            next_state = self.maze.is_move_valid(action, position=robot_state)
-    
-            if next_state is None:
-                next_state = robot_state
-    
-            next_states.append(next_state)
+                    
+                    values[action] += belief * self.values[target_x, target_y, robot_state[0], robot_state[1], action]
+                    
+        return np.argmax(values)
     
     def draw(self, target_location):
         
-        self.maze.draw_maze(values=self.values[target_location[0], target_location[1]])
+        self.maze.draw_maze(values=np.max(self.values[target_location[0], target_location[1]], axis=2))
         
-    def step(self):
+    def step(self, show):
         
-        _, _, max_action = self.get_action(self.maze.position)
+        action = self.get_action(self.maze.position)
         
-        self.maze.step(max_action, move_target=True, show=True, values=self.target_belief)
+        self.maze.step(action, move_target=True, show=show, values=self.target_belief)
         
         self.update_belief(self.maze.position, self.maze.get_observation(self.maze.position))
     
 if __name__ == "__main__":
     
-    solver = POMDPMazeSolver(noise=0.0, method="most_likely")
+    method = "most_likely"
+    noise = 0.3
+    solver = POMDPMazeSolver(noise=noise, method=method)
     
     num_iterations = None
     solver.learn_values(num_iterations)
@@ -167,8 +139,15 @@ if __name__ == "__main__":
     
     # input("Press Enter to close the Figure and end the program...")
     
-    for i in range(1000):
+    show = False
+    for i in range(100):
         
-        solver.step()
+        solver.step(show)
         
-        time.sleep(0.03)
+        if noise == 0.3 and show:
+            plt.savefig("figures/pomdp/%s_map%d.png" % (method, i))
+        
+        if show:
+            time.sleep(0.1)
+        
+    print("Reward using %s after 100 steps with %.1f noise: %.3f" % (method, noise, solver.maze.reward_current))
